@@ -1,0 +1,21 @@
+# Required
+requests>=2.28.0
+
+# Required for password encryption in the #PWD_INSTAGRAM:4 format (RSA + AES-GCM).
+# Without it, login falls back to plaintext (:0:), which Instagram may reject.
+pycryptodome>=3.18.0
+
+# Recommended HTTP engine: impersonates OkHttp on Android (HTTP/2 + real OkHttp
+# JA3/JA4 TLS fingerprint) so traffic looks like the real Instagram Android app.
+# The client auto-selects it when present (engine="auto").
+tls-client>=1.0.1
+
+# Alternative engine: curl-impersonate (browser TLS + HTTP/2). Used if tls-client
+# is unavailable, or explicitly via engine="curl_cffi".
+curl_cffi>=0.7
+
+# Optional: reading dimensions / generating cover images for photo & video uploads.
+Pillow>=9.0.0
+
+# Optional: needed only when using a socks5 proxy.
+# requests[socks]

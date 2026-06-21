@@ -1,0 +1,35 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Virtual envs ---
+.venv/
+venv/
+env/
+.env
+
+# --- Secrets / runtime state (NEVER commit) ---
+# saved sessions contain auth tokens
+session*.json
+*.session
+cookies.txt
+*.cookies
+
+# --- Reverse-engineering source (do NOT publish copyrighted app code) ---
+/apk/
+
+# --- Editors / OS ---
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+*.log
