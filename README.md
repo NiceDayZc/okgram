@@ -12,19 +12,65 @@ It is bundled into a **single class**, `InstagramAPI`, that covers **every endpo
 
 ## Installation
 
+Install directly from GitHub with **pip** — it pulls every dependency automatically:
+
 ```bash
-pip install -r okgram/requirements.txt
-# or, minimal:
-pip install requests pycryptodome tls-client curl_cffi
+pip install git+https://github.com/NiceDayZc/okgram.git
 ```
 
-- `requests` — fallback HTTP engine
-- `pycryptodome` — encrypts the password at login time (`#PWD_INSTAGRAM:4` = RSA + AES-GCM, just like the real app)
-- `tls-client` — **recommended** HTTP engine: impersonates OkHttp on Android (HTTP/2 + real OkHttp JA3/JA4)
-- `curl_cffi` — alternative engine (curl-impersonate: browser TLS + HTTP/2)
-- (optional) `requests[socks]` for a socks5 proxy with the `requests` engine
+Pin a branch / tag:
 
-Place the `okgram/` folder next to your script, then `from okgram import InstagramAPI`
+```bash
+pip install "git+https://github.com/NiceDayZc/okgram.git@main"
+```
+
+Upgrade later:
+
+```bash
+pip install --upgrade --force-reinstall "git+https://github.com/NiceDayZc/okgram.git"
+```
+
+Editable / development install (clone, then hack on it):
+
+```bash
+git clone https://github.com/NiceDayZc/okgram.git
+cd okgram
+pip install -e .
+```
+
+Optional extras:
+
+```bash
+# + Pillow (read image sizes on upload)
+pip install "okgram[media] @ git+https://github.com/NiceDayZc/okgram.git"
+# + socks5 proxy support for the requests engine
+pip install "okgram[socks] @ git+https://github.com/NiceDayZc/okgram.git"
+```
+
+**Dependencies (installed for you):**
+
+| Package | Why |
+|---|---|
+| `requests` | fallback HTTP engine + cookie jar |
+| `pycryptodome` | password encryption at login (`#PWD_INSTAGRAM:4` = RSA + AES-GCM) |
+| `tls-client` | **recommended** engine — impersonates OkHttp on Android (HTTP/2 + OkHttp JA3/JA4) |
+| `curl_cffi` | alternative engine (curl-impersonate: browser TLS + HTTP/2) |
+
+Verify the install:
+
+```bash
+python -c "import okgram; print('okgram', okgram.__version__)"
+```
+
+Then in your code:
+
+```python
+from okgram import OkGram          # aliases: InstagramAPI, Client (same class)
+cl = OkGram()
+```
+
+> No pip? You can also just drop the `okgram/` folder next to your script and
+> `pip install requests pycryptodome tls-client curl_cffi` manually.
 
 ---
 
