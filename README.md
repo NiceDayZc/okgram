@@ -1,4 +1,17 @@
-# okgram — Instagram Private API client (Python)
+# okgram — Instagram Private API client for Python (phone-grade, anti-bounce)
+
+![Python](https://img.shields.io/badge/python-3.8%2B-blue)
+![License: MIT](https://img.shields.io/badge/license-MIT-green)
+![Transport](https://img.shields.io/badge/transport-OkHttp%20HTTP%2F2-orange)
+![TLS](https://img.shields.io/badge/TLS-JA3%2FJA4%20impersonation-red)
+![Endpoints](https://img.shields.io/badge/endpoints-348%2B%20methods-purple)
+
+> **okgram** is a full, phone-grade **Instagram Private API** wrapper for Python — a
+> modern **instagrapi alternative** that talks like the real **Instagram Android app**
+> (**OkHttp HTTP/2** + **JA3/JA4 TLS** impersonation), auto-syncs geo to your IP, fixes
+> the **`IG-U-RUR`** routing that makes a **sessionid** get logged out, and stops
+> **login_required / challenge_required / feedback_required** bounces. Login by
+> **username/password** or **sessionid/cookies**, with a built-in **CLI** and `doctor`.
 
 A Python client for the **Instagram Private API** (`i.instagram.com/api/v1`),
 reverse-engineered from **Instagram Lite 516.0.0.8.103** + Instagram Android profiles.
@@ -492,3 +505,12 @@ from okgram.exceptions import (
 
 - The target/host/app-id were extracted from a decompile of **Instagram Lite 516.0.0.8.103** (`X-IG-App-ID: 567067343352427`, host `i.instagram.com` / `iglite-z.instagram.com`, `SIGNATURE`-style signing)
 - The endpoint set is the Instagram Private API `v1`, the same one used by the Instagram Android/Lite app
+
+---
+
+## Topics
+
+Instagram API · Instagram Private API · instagram-private-api · instagrapi alternative ·
+Instagram bot · Instagram automation · Python · OkHttp · HTTP/2 · JA3 · JA4 · TLS fingerprint ·
+TLS impersonation · tls-client · curl_cffi · anti-detection · device fingerprint · sessionid login ·
+cookie login · IG-U-RUR · proxy · rate limiter · multi-account · reverse engineering · CLI
