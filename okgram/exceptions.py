@@ -88,6 +88,17 @@ class RateLimitError(ClientThrottledError):
     """Rate limit"""
 
 
+# --- client-side guards (raised by okgram itself, not by IG) ---------------
+class RateLimitReached(ClientError):
+    """The local rate governor blocked an action before it was sent (client-side
+    safety brake to avoid IG's feedback_required / action blocks)."""
+
+
+class EgressMismatch(ClientError):
+    """The egress IP's region no longer matches the session's region -- sending
+    would risk an instant challenge (raised by the consistency guard)."""
+
+
 # --- two factor / challenge ------------------------------------------------
 class TwoFactorRequired(ClientError):
     """2FA confirmation required — see self.extra['two_factor_info']"""

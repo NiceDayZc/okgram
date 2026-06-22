@@ -62,6 +62,8 @@ IG_RUN_WRITES=1 python examples/03_friendship.py          # enable writes
 | `17_notification.py` | Notifications | activity, badges, push, settings |
 | `18_engine_fingerprint.py` | HTTP engine | pick/inspect engine; live TLS/HTTP2 fingerprint check |
 | `19_session_management.py` | Session/proxy/errors | construct, proxy, persist, exception handling |
+| `20_phone_grade.py` | Anti-bounce | geo auto-sync, IG-U-RUR routing, mobile/web modes, `bootstrap()`, `doctor` |
+| `21_hardcore.py` | Hardcore layer | rate governor, egress guard, fingerprint proof, multi-account encrypted vault |
 
 > ⚠️ Using the private API violates Instagram's ToS and may get your account
 > challenged/restricted. Use your own account, at your own risk.

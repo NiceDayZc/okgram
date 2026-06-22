@@ -18,7 +18,7 @@ import time
 from json import JSONDecodeError
 from typing import Any, Dict, Optional, Union
 
-from .. import config, utils
+from .. import config, guard, utils
 from ..exceptions import (
     ClientError,
     ClientConnectionError,
@@ -26,6 +26,8 @@ from ..exceptions import (
     ClientJSONDecodeError,
     ClientNotFoundError,
     ClientThrottledError,
+    EgressMismatch,
+    FeedbackRequired,
     map_exception,
 )
 
@@ -44,12 +46,23 @@ class PrivateRequestMixin:
     mid: str = ""
     ig_www_claim: str = "0"
     csrftoken: str = ""
+    # IG-U-* session-routing headers. IG sets these (ig-set-ig-u-*) and expects the
+    # client to echo them back on EVERY subsequent request; not doing so breaks
+    # session continuity and is a top cause of "login_required" bounces.
+    ig_u_rur: str = ""
+    ig_u_shbid: str = ""
+    ig_u_shbts: str = ""
+    ig_direct_region_hint: str = ""
     locale: str = config.LOCALE
-    country: str = "US"
-    country_code: int = 1
+    country: str = config.DEFAULT_COUNTRY
+    country_code: int = config.DEFAULT_COUNTRY_CODE
     timezone_offset: int = config.TIMEZONE_OFFSET
+    eu_dc_enabled: str = config.EU_DC_ENABLED
     app_version: str = config.APP_VERSION
     version_code: str = config.VERSION_CODE
+    bloks_version_id: str = config.BLOKS_VERSION_ID
+    mode: str = config.MODE_MOBILE
+    nav_chain: str = ""
     delay_range: tuple = config.REQUEST_DELAY_RANGE
     request_timeout: int = config.REQUEST_TIMEOUT
     max_retries: int = config.MAX_RETRIES
@@ -64,23 +77,31 @@ class PrivateRequestMixin:
     # ------------------------------------------------------------------
     @property
     def base_headers(self) -> Dict[str, str]:
+        """Request headers -- mobile (Android app) or web (browser) per ``self.mode``."""
+        if getattr(self, "mode", config.MODE_MOBILE) == config.MODE_WEB:
+            return self._web_base_headers()
+        return self._mobile_base_headers()
+
+    def _mobile_base_headers(self) -> Dict[str, str]:
         ua = self.device.user_agent(self.app_version, self.version_code, self.locale)
         # Pigeon session id is ONE id per app session (stable across requests).
         # Regenerating it per request — as before — is an obvious bot signal, so
         # keep it on the client and reuse it for the instance's lifetime.
         if not getattr(self, "pigeon_session_id", None):
             self.pigeon_session_id = config.PIGEON_SESSION_PREFIX + utils.generate_uuid()
+        bloks = getattr(self, "bloks_version_id", None) or config.BLOKS_VERSION_ID
         headers = {
             "X-IG-App-Locale": self.locale,
             "X-IG-Device-Locale": self.locale,
             "X-IG-Mapped-Locale": self.locale,
+            "X-IG-Nav-Chain": self.nav_chain or "",
             "X-Pigeon-Session-Id": self.pigeon_session_id,
             "X-Pigeon-Rawclienttime": f"{time.time():.3f}",
             "X-IG-Bandwidth-Speed-KBPS": "-1.000",
             "X-IG-Bandwidth-TotalBytes-B": "0",
             "X-IG-Bandwidth-TotalTime-MS": "0",
             "X-IG-App-Startup-Country": self.country,
-            "X-Bloks-Version-Id": config.BLOKS_VERSION_ID,
+            "X-Bloks-Version-Id": bloks,
             "X-IG-WWW-Claim": self.ig_www_claim or "0",
             "X-Bloks-Is-Layout-RTL": "false",
             "X-Bloks-Is-Panorama-Enabled": "true",
@@ -89,19 +110,25 @@ class PrivateRequestMixin:
             "X-IG-Android-ID": self.device.device_id,
             "X-IG-Timezone-Offset": str(self.timezone_offset),
             "X-IG-Connection-Type": config.CONNECTION_TYPE,
+            "X-IG-EU-DC-ENABLED": str(getattr(self, "eu_dc_enabled", config.EU_DC_ENABLED)),
             "X-IG-Capabilities": config.CAPABILITIES,
             "X-IG-App-ID": config.APP_ID,
+            "X-ASBD-ID": config.ASBD_ID,
             "Priority": "u=3",
             "User-Agent": ua,
             "Accept-Language": config.ACCEPT_LANGUAGE,
-            "Accept-Encoding": "gzip, deflate",
             # NOTE: no "Host"/"Connection" headers — over HTTP/2 the host travels
             # in the :authority pseudo-header and hop-by-hop headers are illegal;
             # the transport/engine manages the connection.
+            "Accept-Encoding": "gzip, deflate, br",
             "X-FB-HTTP-Engine": "Liger",
             "X-FB-Client-IP": "True",
             "X-FB-Server-Cluster": "True",
+            "X-FB-Connection-Type": config.FB_CONNECTION_TYPE,
         }
+        # X-IG-Nav-Chain is omitted entirely (not sent empty) when we have no chain.
+        if not headers["X-IG-Nav-Chain"]:
+            headers.pop("X-IG-Nav-Chain")
         if self.mid:
             headers["X-MID"] = self.mid
         if self.csrftoken:
@@ -112,18 +139,57 @@ class PrivateRequestMixin:
             if self.user_id:
                 headers["IG-U-DS-USER-ID"] = str(self.user_id)
                 headers["IG-INTENDED-USER-ID"] = str(self.user_id)
+        # echo the session-routing headers back (continuity -> fewer bounces)
+        self._attach_routing_headers(headers)
         return headers
+
+    def _web_base_headers(self) -> Dict[str, str]:
+        """Browser-style headers for a web-origin session (www.instagram.com)."""
+        headers = {
+            "User-Agent": config.WEB_USER_AGENT,
+            "Accept": "*/*",
+            "Accept-Language": f"{config.ACCEPT_LANGUAGE},en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "X-IG-App-ID": config.WEB_APP_ID,
+            "X-ASBD-ID": config.ASBD_ID,
+            "X-IG-WWW-Claim": self.ig_www_claim or "0",
+            "X-Requested-With": "XMLHttpRequest",
+            "Origin": f"https://{config.WEB_DOMAIN}",
+            "Referer": f"https://{config.WEB_DOMAIN}/",
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Dest": "empty",
+        }
+        if self.mid:
+            headers["X-MID"] = self.mid
+        if self.csrftoken:
+            headers["X-CSRFToken"] = self.csrftoken
+        self._attach_routing_headers(headers)
+        return headers
+
+    def _attach_routing_headers(self, headers: Dict[str, str]) -> None:
+        """Echo IG-U-* routing headers (set by the server) on outbound requests."""
+        if self.user_id and "IG-U-DS-USER-ID" not in headers:
+            headers["IG-U-DS-USER-ID"] = str(self.user_id)
+        if self.ig_u_rur:
+            headers["IG-U-RUR"] = self.ig_u_rur
+        if self.ig_u_shbid:
+            headers["IG-U-SHBID"] = self.ig_u_shbid
+        if self.ig_u_shbts:
+            headers["IG-U-SHBTS"] = self.ig_u_shbts
+        if self.ig_direct_region_hint:
+            headers["IG-U-IG-DIRECT-REGION-HINT"] = self.ig_direct_region_hint
 
     @property
     def public_headers(self) -> Dict[str, str]:
         """headers for the web API (www.instagram.com)"""
-        ua = self.device.user_agent(self.app_version, self.version_code, self.locale)
+        # Web requests always look like the browser web client regardless of mode.
         headers = {
-            "User-Agent": ua,
+            "User-Agent": config.WEB_USER_AGENT,
             "Accept": "*/*",
-            "Accept-Language": config.ACCEPT_LANGUAGE,
-            "X-IG-App-ID": config.APP_ID,
-            "X-ASBD-ID": "129477",
+            "Accept-Language": f"{config.ACCEPT_LANGUAGE},en;q=0.9",
+            "X-IG-App-ID": config.WEB_APP_ID,
+            "X-ASBD-ID": config.ASBD_ID,
             "X-IG-WWW-Claim": self.ig_www_claim or "0",
             "X-Requested-With": "XMLHttpRequest",
             "Origin": f"https://{config.WEB_DOMAIN}",
@@ -131,6 +197,7 @@ class PrivateRequestMixin:
         }
         if self.csrftoken:
             headers["X-CSRFToken"] = self.csrftoken
+        self._attach_routing_headers(headers)
         return headers
 
     # ------------------------------------------------------------------
@@ -173,7 +240,12 @@ class PrivateRequestMixin:
         if endpoint.startswith("http"):
             url = endpoint
         else:
-            base = config.BASE_API_URL
+            # web mode talks to www.instagram.com/api/v1 (origin-consistent with a
+            # browser sessionid); mobile mode talks to i.instagram.com/api/v1.
+            if getattr(self, "mode", config.MODE_MOBILE) == config.MODE_WEB:
+                base = config.WEB_API_URL
+            else:
+                base = config.BASE_API_URL
             if domain:
                 base = f"https://{domain}/api/{config.API_VERSION}/"
             url = base + endpoint.lstrip("/")
@@ -193,8 +265,32 @@ class PrivateRequestMixin:
                 body = data if isinstance(data, dict) else {"signed_body": data}
 
         method = "POST" if data is not None else "GET"
+        # match the app deterministically: form-encoded body for signed POSTs
+        if method == "POST" and "Content-Type" not in req_headers:
+            req_headers["Content-Type"] = (
+                "application/x-www-form-urlencoded; charset=UTF-8"
+            )
         max_try = self.max_retries if retries is None else retries
         last_exc: Optional[Exception] = None
+
+        # rate governor: gate write actions ONCE before sending (reads pass through).
+        # May sleep (human pacing) or raise RateLimitReached -- both intended.
+        gov = getattr(self, "governor", None)
+        if gov is not None and method == "POST" and not login:
+            gov.gate(endpoint)
+
+        # egress guard: verify the IP region matches the session ONCE before the
+        # first write (a sudden country change is an instant-challenge trigger).
+        # Lazy + once-per-session so it doesn't add a geo lookup to every request.
+        if (getattr(self, "guard_policy", None) and method == "POST" and not login
+                and not getattr(self, "_egress_checked", False)):
+            self._egress_checked = True
+            try:
+                guard.verify_egress(self, policy=self.guard_policy)
+            except EgressMismatch:
+                raise
+            except Exception:  # noqa: BLE001 -- a failed geo lookup must not block
+                logger.debug("egress guard check skipped", exc_info=True)
 
         for attempt in range(max_try + 1):
             # random delay to mimic human behavior (skip the first login attempt for speed)
@@ -212,13 +308,26 @@ class PrivateRequestMixin:
                 self.last_response = resp
                 self.last_response_ts = time.time()
                 self._update_from_response_headers(resp)
-                return self._parse_response(resp, endpoint)
+                result = self._parse_response(resp, endpoint)
+                if gov is not None:
+                    gov.note_success()
+                return result
+
+            except FeedbackRequired:
+                # an action block -- DON'T retry (retrying makes it worse); let the
+                # governor back off, then propagate so the caller can pause.
+                if gov is not None:
+                    gov.note_block()
+                raise
 
             except (ClientThrottledError, ClientConnectionError) as exc:
                 last_exc = exc
+                if isinstance(exc, ClientThrottledError) and gov is not None:
+                    gov.note_block()
                 if attempt >= max_try:
                     raise
-                wait = config.RETRY_BACKOFF * (attempt + 1)
+                # smart backoff: honour Retry-After when IG sends it, else exp+jitter
+                wait = guard.retry_wait(exc, attempt)
                 logger.warning(
                     "request %s failed (%s) retry in %.1fs", endpoint, exc, wait
                 )
@@ -289,20 +398,45 @@ class PrivateRequestMixin:
     # internal helpers
     # ------------------------------------------------------------------
     def _update_from_response_headers(self, resp: Any) -> None:
-        """Pull new token/claim/mid from the response headers"""
+        """
+        Adopt the live session state IG hands back in response headers: the auth
+        token, www-claim, mid, user id, and -- crucially -- the IG-U-* routing
+        headers that must be echoed on every later request to keep the session
+        alive. An ``ig-set-authorization`` of the literal value ``"0"`` means
+        "clear it", which we honour.
+        """
         h = resp.headers
-        if h.get("ig-set-authorization"):
-            self.authorization = h["ig-set-authorization"]
+        set_auth = h.get("ig-set-authorization")
+        if set_auth:
+            # IG sends "Bearer IGT:2:<blob>" to set the token, or exactly "0" to
+            # clear it. Only "0" clears -- any non-zero value is a real token.
+            self.authorization = "" if set_auth.strip() == "0" else set_auth
         if h.get("x-ig-set-www-claim"):
             self.ig_www_claim = h["x-ig-set-www-claim"]
         if h.get("ig-set-x-mid"):
             self.mid = h["ig-set-x-mid"]
         if h.get("ig-set-ig-u-ds-user-id"):
             self.user_id = h["ig-set-ig-u-ds-user-id"]
-        # csrftoken comes with the cookie
-        token = resp.cookies.get("csrftoken") or self.session.cookies.get("csrftoken")
+        # IG-U-* session-routing headers (echoed back by _attach_routing_headers)
+        if h.get("ig-set-ig-u-rur"):
+            self.ig_u_rur = h["ig-set-ig-u-rur"]
+        if h.get("ig-set-ig-u-shbid"):
+            self.ig_u_shbid = h["ig-set-ig-u-shbid"]
+        if h.get("ig-set-ig-u-shbts"):
+            self.ig_u_shbts = h["ig-set-ig-u-shbts"]
+        if h.get("ig-set-ig-u-ig-direct-region-hint"):
+            self.ig_direct_region_hint = h["ig-set-ig-u-ig-direct-region-hint"]
+        # csrftoken + rur also arrive as cookies -- keep both in sync.
+        jar = self.session.cookies
+        token = resp.cookies.get("csrftoken") or jar.get("csrftoken")
         if token:
             self.csrftoken = token
+        rur_cookie = resp.cookies.get("rur") or jar.get("rur")
+        if rur_cookie and not self.ig_u_rur:
+            self.ig_u_rur = rur_cookie
+        mid_cookie = resp.cookies.get("mid") or jar.get("mid")
+        if mid_cookie and not self.mid:
+            self.mid = mid_cookie
 
     def _parse_response(
         self, resp: Any, endpoint: str

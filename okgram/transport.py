@@ -57,21 +57,31 @@ ENGINE_PRIORITY = ("tls_client", "curl_cffi", "requests")
 #: Default browser profile for curl_cffi (no Android-app profile exists there).
 CURL_IMPERSONATE_DEFAULT = "chrome"
 
-#: Header order that the Instagram Android app roughly emits on the wire.
-#: tls_client sends headers in this order (a real client never alphabetises them
-#: the way requests does).
+#: Web-mode profile -- a recent Chrome the curl_cffi build ships, so the TLS/JA3
+#: matches the browser User-Agent advertised in web mode. "chrome" is the safe
+#: alias that resolves to whatever recent Chrome the installed curl_cffi exposes.
+WEB_IMPERSONATE_DEFAULT = "chrome"
+
+#: Header order that the Instagram Android app emits on the wire. tls_client
+#: sends headers in this exact order (a real client never alphabetises them the
+#: way ``requests`` does). The IG-U-* routing headers and X-IG-Nav-Chain are part
+#: of the real ordering and were previously missing.
 HEADER_ORDER = [
     "X-IG-App-Locale", "X-IG-Device-Locale", "X-IG-Mapped-Locale",
+    "X-IG-Nav-Chain",
     "X-Pigeon-Session-Id", "X-Pigeon-Rawclienttime",
     "X-IG-Bandwidth-Speed-KBPS", "X-IG-Bandwidth-TotalBytes-B",
     "X-IG-Bandwidth-TotalTime-MS", "X-IG-App-Startup-Country",
     "X-Bloks-Version-Id", "X-IG-WWW-Claim", "X-Bloks-Is-Layout-RTL",
     "X-Bloks-Is-Panorama-Enabled", "X-IG-Device-ID", "X-IG-Family-Device-ID",
     "X-IG-Android-ID", "X-IG-Timezone-Offset", "X-IG-Connection-Type",
-    "X-IG-Capabilities", "X-IG-App-ID", "Priority", "User-Agent",
-    "Accept-Language", "Accept-Encoding", "Host", "X-MID", "X-CSRFToken",
-    "Authorization", "IG-U-DS-USER-ID", "IG-INTENDED-USER-ID",
-    "X-FB-HTTP-Engine", "X-FB-Client-IP", "X-FB-Server-Cluster", "Connection",
+    "X-IG-EU-DC-ENABLED", "X-IG-Capabilities", "X-IG-App-ID", "X-ASBD-ID",
+    "Priority", "User-Agent", "Accept-Language", "X-MID",
+    "Authorization", "X-IG-WWW-Claim",
+    "IG-U-DS-USER-ID", "IG-U-RUR", "IG-U-SHBID", "IG-U-SHBTS",
+    "IG-U-IG-DIRECT-REGION-HINT", "IG-INTENDED-USER-ID", "X-CSRFToken",
+    "Accept-Encoding", "X-FB-HTTP-Engine", "X-FB-Client-IP",
+    "X-FB-Server-Cluster", "X-FB-Connection-Type", "Host", "Connection",
 ]
 
 
@@ -140,7 +150,10 @@ class _CurlCookieJar:
 
     def get(self, name: str, default: Any = None) -> Any:
         try:
-            return self._s.cookies.get(name) or default
+            # distinguish "missing" (None) from a present-but-falsy value (e.g. "")
+            # -- `or default` would wrongly drop an empty-string cookie value.
+            result = self._s.cookies.get(name)
+            return result if result is not None else default
         except Exception:
             return default
 
@@ -187,9 +200,13 @@ class Session:
     # -- engine construction -------------------------------------------------
     def _build_engine(self) -> None:
         if self.engine == "tls_client":
+            # random_tls_extension_order=False: a real OkHttp/BoringSSL stack emits
+            # a STABLE extension order. Randomising it per request makes the JA3/JA4
+            # change every call -- which is itself a strong bot signal -- so keep
+            # the order fixed to match the chosen okhttp profile.
             self._sess = tls_client.Session(
                 client_identifier=self.impersonate or "okhttp4_android_13",
-                random_tls_extension_order=True,
+                random_tls_extension_order=False,
                 header_order=HEADER_ORDER,
             )
             self.cookies = self._sess.cookies  # already a RequestsCookieJar
