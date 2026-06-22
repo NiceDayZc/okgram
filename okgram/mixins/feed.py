@@ -61,7 +61,7 @@ class FeedMixin:
             "is_dark_mode": "1",
             "will_sound_on": "0",
             "session_id": self.device.client_session_id,
-            "bloks_versioning_id": config.BLOKS_VERSION_ID,
+            "bloks_versioning_id": getattr(self, "bloks_version_id", None) or config.BLOKS_VERSION_ID,
         }
         if reason in ("pull_to_refresh", "auto_refresh", "cold_start_fetch", "warm_start_fetch"):
             data["is_pull_to_refresh"] = "1" if "pull" in reason else "0"

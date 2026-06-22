@@ -4,6 +4,12 @@ A Python client for the **Instagram Private API** (`i.instagram.com/api/v1`),
 reverse-engineered from **Instagram Lite 516.0.0.8.103** + Instagram Android profiles.
 It is bundled into a **single class**, `InstagramAPI`, that covers **every endpoint category** (19 categories / 348+ methods).
 
+It is **phone-grade**: it keeps the whole identity (device + `IG-U-RUR` routing +
+`X-MID` + `X-IG-WWW-Claim` + geo + app-id + OkHttp TLS) internally consistent and
+stable, **auto-syncs your region to your real IP in any country**, replays the
+app's cold-start, and ships an `okgram` CLI with a `doctor` that tells you exactly
+why a session is bouncing. See **[Phone-grade sessions](#phone-grade-sessions--why-your-sessionid-stops-bouncing)**.
+
 > ⚠️ **Disclaimer** Using the private API violates Instagram's Terms of Service and may cause your account
 > to be challenged / restricted / suspended. Use it only on your own account, responsibly, and at your own risk.
 > This code is intended for education / automation of your own account / security research.
@@ -98,6 +104,149 @@ With `tls_client` the OkHttp profile is **auto-mapped from the simulated device'
 (e.g. Android 13 → `okhttp4_android_13`), so the TLS fingerprint, HTTP/2 settings, header order, and
 the `User-Agent` all agree — exactly like the real app. (Verified end-to-end: requests go out as `h2`
 with an OkHttp JA3/JA4, not Python's.)
+
+---
+
+## Phone-grade sessions — why your `sessionid` stops bouncing
+
+Instagram does **not** identify a session by `sessionid` alone. It correlates
+`sessionid` + the **device** + `X-MID` + **`IG-U-RUR`** (region routing) +
+`X-IG-WWW-Claim` + the **egress IP / geo** + the **app-id**. If any of those
+contradict each other, IG treats it as a takeover → `login_required` / challenge
+(the dreaded "เด้ง"). okgram now keeps the whole identity **internally consistent
+and stable**, which is what actually keeps a session alive:
+
+- **Routing headers captured + echoed.** `IG-U-RUR`, `IG-U-SHBID`, `IG-U-SHBTS`,
+  `IG-U-IG-DIRECT-REGION-HINT` are read from every response and replayed on every
+  request (and persisted in the session bundle). Missing `IG-U-RUR` is a top cause
+  of bounces — it is now handled end-to-end.
+- **Geo auto-sync, every country.** The client detects your **real egress IP**
+  region (through your proxy, if any) and aligns `country` / calling-code /
+  `timezone` / `X-IG-EU-DC-ENABLED` so the fingerprint can never contradict the
+  network. No more "US locale + Bangkok timezone" mismatches.
+- **Live app-config.** `bloks_version_id` / password public key / routing are
+  pulled live from IG's own `launcher/sync` + `qe/sync` instead of going stale.
+- **Cold-start behavior.** On bring-up it replays the app's real sequence
+  (timeline → stories → inbox → me) with a believable `X-IG-Nav-Chain`, so the
+  session doesn't "pop into existence and immediately act" like a bot.
+- **Stable TLS.** OkHttp JA3/JA4 with a **fixed** extension order (randomising it
+  per request was itself a bot signal).
+- **Mobile vs web mode.** A `sessionid` exported from a **browser** is a *web*
+  session bound to the web app-id. `mode="web"` talks to `www.instagram.com` with
+  the browser app-id / UA / Chrome TLS — *origin-consistent* with that session, so
+  it bounces far less than forcing a web session to impersonate a phone.
+
+### One-call bring-up (recommended)
+
+```python
+from okgram import InstagramAPI
+
+cl = InstagramAPI(device_seed="<account-id>")   # auto_geo=True by default
+cl.bootstrap("<sessionid or cookie string>")    # geo→config→install→warmup
+cl.dump_settings("session.json")                # save the full identity bundle
+
+print(cl.get_current_user()["username"])
+```
+
+`bootstrap()` runs, in order: align region to your IP → pull live config →
+install the session → replay the cold-start. Reload it later with the exact same
+identity:
+
+```python
+cl = InstagramAPI()
+cl.load_settings("session.json")     # restores device + rur + mid + claim + geo + mode
+```
+
+### The `okgram` CLI
+
+Installing the package also installs an `okgram` command (also `python -m okgram`):
+
+```bash
+# install a browser sessionid as a phone-grade session and save it
+okgram import "25025320%3A...%3A..." --session acct.json
+okgram import @cookies.txt --session acct.json          # cookie file / EditThisCookie JSON
+echo "$SID" | okgram import - --session acct.json        # from stdin
+
+# diagnose WHY a session is at risk (region/routing/device/TLS contradictions)
+okgram doctor --session acct.json --online               # --online also checks egress IP
+
+okgram whoami  --session acct.json
+okgram warmup  --session acct.json                       # replay cold-start, re-save
+okgram feed    --session acct.json
+okgram user    instagram --session acct.json
+okgram geo     --save --session acct.json                # detect + pin region
+okgram session show --session acct.json                  # masked summary
+okgram repl    --session acct.json                       # interactive shell, `cl` bound
+```
+
+If a browser `sessionid` still bounces in mobile mode, switch to the
+origin-consistent web mode:
+
+```bash
+okgram import "<sessionid>" --mode web --session acct.json
+```
+
+`okgram doctor` is the fastest way to find the exact problem — it prints each
+check (region, calling-code, timezone, EU-DC, `X-MID`, `IG-U-RUR`, `www-claim`,
+device, transport, and with `--online` the egress-IP region + live TLS/HTTP-2
+fingerprint) as `OK / WARN / FAIL` with the fix.
+
+---
+
+## Hardcore layer (rate governor · egress guard · fingerprint proof · vault)
+
+Four opt-in subsystems for serious, multi-account use:
+
+**1. Rate governor — stops `feedback_required` / action blocks.** Cadence is the
+other thing IG watches. The governor enforces human-like per-action caps
+(per-hour + per-day for likes / follows / DMs …), a randomised think-time, an
+optional sleep window, and an automatic cool-down that backs off when IG returns
+`feedback_required`. Reads are never gated; counts persist in the session bundle.
+
+```python
+cl = InstagramAPI(device_seed="acct", govern=True)   # or cl.enable_governor(mode="raise")
+cl.media_like(media_id)          # gated: paced + counted; raises/sleeps at the cap
+```
+
+**2. Egress guard — blocks the instant-challenge IP switch.** Before acting,
+verify the egress IP's region still matches the session; on drift it re-syncs
+(or raises) instead of letting IG see a sudden country change.
+
+```python
+cl.guard_egress(policy="resync")     # 'resync' | 'raise' | 'warn'
+```
+
+The request layer also does **smart retry**: it honours IG's `Retry-After` header
+instead of a blind fixed sleep, and never retries an action block.
+
+**3. Fingerprint proof — measure what actually leaves the socket.**
+
+```bash
+okgram fingerprint --session acct.json
+# -> JA3 hash, JA4, HTTP/2 Akamai fingerprint, negotiated TLS, the UA IG saw,
+#    and a verdict: PHONE-GRADE (OkHttp/h2) / BROWSER-GRADE / WEAK (Python/h1)
+```
+
+```python
+print(cl.fingerprint()["verdict"])
+```
+
+**4. Multi-account vault — one device + one proxy + one identity per account,
+encrypted at rest.**
+
+```bash
+okgram accounts add alice "<sessionid>" --proxy http://u:p@host:port --bootstrap \
+        --store ./vault --password "secret"
+okgram accounts list  --store ./vault --password "secret"
+okgram accounts use   alice --store ./vault --password "secret" --online
+```
+
+```python
+from okgram import SessionStore
+vault = SessionStore("./vault", password="secret")     # AES-GCM (PBKDF2) at rest
+vault.add("alice", "<sessionid>", proxy="http://u:p@host:port", bootstrap=True)
+cl = vault.open("alice")                                # device + routing + proxy restored
+```
 
 ---
 
@@ -269,9 +418,19 @@ print([m for m in dir(cl) if not m.startswith("_") and callable(getattr(cl, m))]
 
 ```
 okgram/
-├── __init__.py          # exports InstagramAPI, Device, exceptions
-├── client.py            # main InstagramAPI class (combines all mixins)
-├── config.py            # constants: app version, app id, capabilities, host, UA template
+├── __init__.py          # exports InstagramAPI, Device, GeoProfile, geo/doctor/behaviors/live_config
+├── __main__.py          # `python -m okgram` -> CLI
+├── cli.py               # the `okgram` command (import/doctor/geo/whoami/warmup/feed/user/session/repl)
+├── client.py            # main InstagramAPI class (combines all mixins) + bootstrap/sync_geo/sync_config
+├── config.py            # constants + geo tables (calling codes, EU-DC, providers) + mode/live-sync config
+├── geo.py               # egress-IP geo auto-detection -> consistent region profile (every country)
+├── live_config.py       # pull bloks/public-key/routing live from launcher+qe sync
+├── behaviors.py         # cold-start sequence + X-IG-Nav-Chain builder + human pacing
+├── doctor.py            # session-identity consistency diagnostics (the bounce finder)
+├── limits.py            # rate governor: per-action caps + think-time + sleep window + cooldown
+├── guard.py             # egress-IP consistency check + Retry-After-aware smart retry
+├── fingerprint.py       # live JA3/JA4/HTTP-2 fingerprint probe + grade
+├── store.py             # multi-account vault: proxy-per-account + AES-GCM encryption
 ├── device.py            # simulates an Android device + builds the User-Agent (deterministic per seed)
 ├── exceptions.py        # exception hierarchy + maps IG errors
 ├── utils.py             # sign body, uuid, media pk<->code, helpers
@@ -312,12 +471,15 @@ from okgram.exceptions import (
 
 ## Tips to "make it actually work" and reduce the chance of getting banned
 
-1. **Use the same `device_seed` per account** and always `dump_settings`/`load_settings` — don't create a new device every time
-2. **Enable `delay_range`** (random delay between requests), don't fire requests back-to-back
-3. **Set `locale`/`country`/`timezone_offset` to match the real account**
-4. **Use a proxy located in the same country as the account** if running from a server: `InstagramAPI(proxy="http://user:pass@host:port")`
-5. **New accounts / accounts that just changed IP** are often challenged — this is normal
-6. **The app version may get rejected** over time → update `APP_VERSION`/`VERSION_CODE` in `config.py`
+1. **Use `bootstrap()` (or `okgram import`)** instead of a bare `login_by_sessionid` — it aligns geo, pulls live config, and warms up so the very first requests are consistent
+2. **Run `okgram doctor --online`** whenever it bounces — it points at the exact contradiction (region/routing/device/IP) instead of guessing
+3. **Use the same `device_seed` per account** and always `dump_settings`/`load_settings` — the saved bundle now carries `IG-U-RUR`/mid/claim/geo, so reloading reproduces the exact identity IG last saw
+4. **Let geo auto-sync** (`auto_geo=True`, default) align `country`/`timezone`/EU-DC to your real IP — or set them by hand to match. Don't mix (e.g. `country="US"` on a Thai IP)
+5. **Enable `delay_range`**, don't fire requests back-to-back
+6. **Match the egress IP to the account's region.** A clean **residential** IP in the account's country (even your home connection) is ideal; route a server through a same-country proxy: `InstagramAPI(proxy="http://user:pass@host:port")` — geo auto-sync detects through the proxy
+7. **A browser `sessionid` is a web session** — if mobile mode bounces, use `mode="web"` (origin-consistent)
+8. **New accounts / accounts that just changed IP** are often challenged — this is normal
+9. **The app version may get rejected** over time → update `APP_VERSION`/`VERSION_CODE` in `config.py`
    (or `cl.set_user_agent(app_version=..., version_code=...)`) to a matching, newer pair
 
 > Note on "actually works": the request structure / signing / headers / payload / endpoints are all

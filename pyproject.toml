@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "okgram"
-version = "1.0.0"
+version = "1.2.0"
 description = "Full Instagram Private API client for Python that talks like the real Android app (OkHttp HTTP/2 + JA3/JA4 TLS impersonation)."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -38,6 +38,9 @@ dependencies = [
 [project.optional-dependencies]
 media = ["Pillow>=9.0.0"]
 socks = ["requests[socks]"]
+
+[project.scripts]
+okgram = "okgram.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/NiceDayZc/okgram"

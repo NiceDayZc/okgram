@@ -417,6 +417,7 @@ class AuthMixin:
         cookies: Union[str, dict],
         *,
         verify: bool = True,
+        warmup: bool = False,
         domain: str = ".instagram.com",
     ) -> bool:
         """
@@ -466,14 +467,24 @@ class AuthMixin:
         if uid:
             self.user_id = str(uid)
 
-        # carry over csrftoken / mid so headers and cookies agree
+        # carry over csrftoken / mid / rur so headers and cookies agree
         if jar.get("csrftoken"):
             self.csrftoken = jar["csrftoken"]
         if jar.get("mid"):
             self.mid = jar["mid"]
+        # IG-U-RUR ships either as a cookie ('rur') or as an explicit key.
+        rur = jar.get("rur") or jar.get("ig-u-rur") or jar.get("IG-U-RUR")
+        if rur:
+            self.ig_u_rur = rur
+        if jar.get("shbid"):
+            self.ig_u_shbid = jar["shbid"]
+        if jar.get("shbts"):
+            self.ig_u_shbts = jar["shbts"]
 
-        # reconstruct the mobile Bearer token (private API prefers this header)
-        if self.user_id:
+        # Reconstruct the mobile Bearer token ONLY in mobile mode -- in web mode the
+        # browser session authenticates by the sessionid cookie + csrftoken, and a
+        # Bearer header would contradict the web-app origin the session came from.
+        if self.user_id and getattr(self, "mode", config.MODE_MOBILE) == config.MODE_MOBILE:
             blob = base64.b64encode(
                 json.dumps(
                     {"ds_user_id": self.user_id, "sessionid": sessionid},
@@ -482,14 +493,22 @@ class AuthMixin:
             ).decode()
             self.authorization = f"Bearer IGT:2:{blob}"
 
+        ok = bool(self.user_id)
         if verify:
             user = self.get_current_user() if hasattr(self, "get_current_user") else None
             if user:
                 self.user_id = str(user.get("pk", self.user_id))
                 self.username = user.get("username", self.username)
-                return True
-            return False
-        return bool(self.user_id)
+                ok = True
+            else:
+                ok = False
+        if ok and warmup:
+            try:
+                from .. import behaviors
+                behaviors.cold_start(self)
+            except Exception:  # noqa: BLE001 -- warmup must never fail the login
+                pass
+        return ok
 
     def login_by_cookie_file(self, path: Union[str, Path], *, verify: bool = True) -> bool:
         """Read cookies from a file (any supported format) and call login_by_cookie."""
@@ -515,10 +534,11 @@ class AuthMixin:
         return True
 
     def login_flow(self) -> None:
-        """Post-login step (sync timeline, enable badge) — mimics the real app"""
+        """Post-login cold-start (timeline -> stories -> inbox -> current user),
+        with a believable nav chain. Mirrors what the app does on first open."""
         try:
-            if hasattr(self, "get_timeline_feed"):
-                self.get_timeline_feed(reason="cold_start_fetch")
+            from .. import behaviors
+            behaviors.cold_start(self)
         except Exception:  # noqa
             pass
 
@@ -526,13 +546,23 @@ class AuthMixin:
     # session: save / load
     # ------------------------------------------------------------------
     def get_settings(self) -> dict:
-        """Collect all state into a dict (saved for next time)"""
+        """
+        Collect ALL state into one immutable identity bundle (saved for next time).
+
+        The bundle travels together: device + uuids + the session-routing headers
+        (mid / www-claim / IG-U-RUR / SHBID / SHBTS / region-hint) + the region
+        (country / tz / eu-dc) + the live-synced bloks version. Reloading it
+        reproduces the exact same identity the server last saw -- the single most
+        important thing for not getting bounced.
+        """
+        geo = getattr(self, "geo", None)
         return {
             "uuids": self.device.to_dict(),
             "device_settings": self.device.profile,
             "user_agent": self.device.user_agent(
                 self.app_version, self.version_code, self.locale
             ),
+            "mode": getattr(self, "mode", config.MODE_MOBILE),
             "authorization_data": {
                 "authorization": self.authorization,
                 "user_id": self.user_id,
@@ -542,22 +572,42 @@ class AuthMixin:
             "mid": self.mid,
             "ig_www_claim": self.ig_www_claim,
             "csrftoken": self.csrftoken,
+            # IG-U-* session-routing headers -- losing these on reload = bounce
+            "ig_u_rur": getattr(self, "ig_u_rur", ""),
+            "ig_u_shbid": getattr(self, "ig_u_shbid", ""),
+            "ig_u_shbts": getattr(self, "ig_u_shbts", ""),
+            "ig_direct_region_hint": getattr(self, "ig_direct_region_hint", ""),
             "country": self.country,
             "country_code": self.country_code,
             "locale": self.locale,
             "timezone_offset": self.timezone_offset,
+            "eu_dc_enabled": getattr(self, "eu_dc_enabled", config.EU_DC_ENABLED),
+            "geo": geo.to_dict() if geo is not None else None,
             "app_version": self.app_version,
             "version_code": self.version_code,
+            "bloks_version_id": getattr(self, "bloks_version_id", config.BLOKS_VERSION_ID),
+            "nav_chain": getattr(self, "nav_chain", ""),
+            "proxy": getattr(self, "proxy", None),
+            "governor": (
+                self.governor.to_dict()
+                if getattr(self, "governor", None) is not None else None
+            ),
             "password_encryption_pub_key": self.password_encryption_pub_key,
             "password_encryption_key_id": self.password_encryption_key_id,
         }
 
     def set_settings(self, settings: dict) -> bool:
-        """Load state back into the client"""
+        """Load the identity bundle back into the client (exact inverse of get_settings)."""
         from ..device import Device
 
         if settings.get("uuids"):
             self.device = Device.from_dict(settings["uuids"])
+        self.mode = settings.get("mode", getattr(self, "mode", config.MODE_MOBILE))
+        # if the saved mode differs from how the transport was built, rebuild it so
+        # the TLS fingerprint matches the mode (done BEFORE cookies are loaded so
+        # they land in the new session's jar).
+        if hasattr(self, "_sync_transport_to_mode"):
+            self._sync_transport_to_mode()
         auth = settings.get("authorization_data", {})
         self.authorization = auth.get("authorization", "")
         self.user_id = auth.get("user_id")
@@ -569,12 +619,41 @@ class AuthMixin:
         self.mid = settings.get("mid", self.mid)
         self.ig_www_claim = settings.get("ig_www_claim", "0")
         self.csrftoken = settings.get("csrftoken", "")
+        # restore the session-routing headers
+        self.ig_u_rur = settings.get("ig_u_rur", getattr(self, "ig_u_rur", ""))
+        self.ig_u_shbid = settings.get("ig_u_shbid", getattr(self, "ig_u_shbid", ""))
+        self.ig_u_shbts = settings.get("ig_u_shbts", getattr(self, "ig_u_shbts", ""))
+        self.ig_direct_region_hint = settings.get(
+            "ig_direct_region_hint", getattr(self, "ig_direct_region_hint", "")
+        )
         self.country = settings.get("country", self.country)
         self.country_code = settings.get("country_code", self.country_code)
         self.locale = settings.get("locale", self.locale)
         self.timezone_offset = settings.get("timezone_offset", self.timezone_offset)
+        self.eu_dc_enabled = settings.get(
+            "eu_dc_enabled", getattr(self, "eu_dc_enabled", config.EU_DC_ENABLED)
+        )
+        if settings.get("geo"):
+            try:
+                from ..geo import GeoProfile
+                self.geo = GeoProfile.from_dict(settings["geo"])
+            except Exception:  # noqa: BLE001
+                pass
         self.app_version = settings.get("app_version", self.app_version)
         self.version_code = settings.get("version_code", self.version_code)
+        self.bloks_version_id = settings.get(
+            "bloks_version_id", getattr(self, "bloks_version_id", config.BLOKS_VERSION_ID)
+        )
+        self.nav_chain = settings.get("nav_chain", getattr(self, "nav_chain", ""))
+        if settings.get("proxy") and hasattr(self, "set_proxy"):
+            self.set_proxy(settings["proxy"])
+        if settings.get("governor"):
+            # round-trip the governor even into a client that wasn't started with
+            # govern=True -- otherwise saved rate counts / cooldown silently vanish.
+            if getattr(self, "governor", None) is None and hasattr(self, "enable_governor"):
+                self.enable_governor()
+            if getattr(self, "governor", None) is not None:
+                self.governor.load_dict(settings["governor"])
         self.password_encryption_pub_key = settings.get(
             "password_encryption_pub_key"
         )

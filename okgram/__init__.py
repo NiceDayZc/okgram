@@ -11,9 +11,23 @@ Example:
     cl.login("user", "pass")
     print(cl.user_info_by_username_v1("instagram"))
 """
-from . import config, exceptions
+from . import (
+    behaviors,
+    config,
+    doctor,
+    exceptions,
+    fingerprint,
+    geo,
+    guard,
+    limits,
+    live_config,
+    store,
+)
 from .client import InstagramAPI
 from .device import Device
+from .geo import GeoProfile
+from .limits import RateGovernor
+from .store import SessionStore
 from .exceptions import (
     BadPassword,
     ChallengeRequired,
@@ -27,14 +41,25 @@ from .exceptions import (
 OkGram = InstagramAPI
 Client = InstagramAPI
 
-__version__ = "1.0.0"
+__version__ = "1.2.0"
 __all__ = [
     "OkGram",
     "Client",
     "InstagramAPI",
     "Device",
+    "GeoProfile",
+    "RateGovernor",
+    "SessionStore",
     "config",
     "exceptions",
+    "geo",
+    "doctor",
+    "behaviors",
+    "live_config",
+    "fingerprint",
+    "guard",
+    "limits",
+    "store",
     "ClientError",
     "LoginRequired",
     "BadPassword",
